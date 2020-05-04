@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Item synchronizer</title>
+    <!-- Include jQuery library -->
+	<script src="https://cdn.jsdelivr.net/npm/jquery@3.3.1/dist/jquery.min.js"></script>
+	
+    <!-- Include the Custom Elements API-->
+    <script src="https://app.kenticocloud.com/js-api/custom-element.js"></script>
+	<link rel="stylesheet" href="./custom-element.css" />
+	
+    <!-- Custom element CSS styles -->
+    <style>
+		/* We recommended you always set margin to zero to avoid problems when displaying the element in UI */
+		@import url(https://fonts.googleapis.com/css?family=Source+Sans+Pro:400,700,400italic,700italic);
+		html{
+		  font-family:sans-serif;
+		  -ms-text-size-adjust:100%;
+		  -webkit-text-size-adjust:100%;
+		}
+		body {
+			margin: 0;
+			padding: 10px;
+		}
+
+		.disabled_overlay {
+			position: fixed;
+			background-color: #EEE;
+			z-index: 10;
+			cursor: not-allowed;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			opacity: 0.7;
+		}
+		
+		#sync {
+			display:none;
+		}
+		
+		#unique-status {
+			display:none;
+		}
+		
+		#synchronizing {
+			display:none;
+			color:#000;
+			-webkit-animation: flash linear 1s infinite;
+			animation: flash linear 1s infinite;
+			position:absolute;
+			top: calc(50% - 1em);
+			left: calc(50% - 5em);
+			font-size: 1.7em;
+			font-weight: bold;
+		}
+		@-webkit-keyframes flash {
+			0% { opacity: 1; } 
+			50% { opacity: .1; } 
+			100% { opacity: 1; }
+		}
+		@keyframes flash {
+			0% { opacity: 1; } 
+			50% { opacity: .1; } 
+			100% { opacity: 1; }
+		}
+    </style>
+</head>
+<body>
+	<div id="sync">
+		<button id="click" class="btn btn--secondary">Synchronize</button>
+		this item and move it to 
+		<select id="workflow" class="btn btn--secondary"></select>
+		workflow step in target environment.
+	</div>
+	<div id="unique-status" class="status-checking item-status"></div>
+	<div id="synchronizing">Synchronizing</div>
+<script>	
+	var itemCodeName = '';
+	var itemID = '';
+	var itemCulture = '';
+	var serviceURL = '';
+	var sourceTypes = {};
+	var targetTypes = {};
+	var sourceTaxonomies = {};
+	var targetTaxonomies = {};
+	var workflow = {};
+	var sourceTypeID = '';
+	var targetTypeID = '';
+	var elements = [];
+	var skipTypes = ["asset", "modular_content"];
+	
+	
+	function setup() {	
+		updateSize();
+		
+		$(document).ajaxStart(function () {
+			$("html").addClass("disabled_overlay");
+			$("#click").attr("disabled", true);
+			$("#synchronizing").show();
+		});
+		$(document).ajaxStop(function () {
+			$("html").removeClass("disabled_overlay");
+			$("#click").attr("disabled", false);
+			$("#synchronizing").hide();
+		});
+		
+		$("#click").click(function(e) {
+			getSourceTypes();
+		});		
+	}
+
+	function getSourceTypes() {
+		var url = serviceURL+"?ep=sourcetypes";
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				if (data.types.length>0) {
+					sourceTypes = data.types;
+					getTargetTypes();
+				}
+			}
+		});			
+	}
+	
+	function getTargetTypes() {
+		var url = serviceURL+"?ep=targettypes";
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				if (data.types.length>0) {
+					targetTypes = data.types;
+					getSourceTaxonomies();
+				}
+			}
+		});			
+	}
+	
+	function getSourceTaxonomies() {
+		var url = serviceURL+"?ep=sourcetaxonomies";
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				if (data.length>0) {
+					sourceTaxonomies = data;
+				}
+				getTargetTaxonomies();
+			}
+		});			
+	}
+	
+	function getTargetTaxonomies() {
+		var url = serviceURL+"?ep=targettaxonomies";
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				if (data.length>0) {
+					targetTaxonomies = data;
+				}
+				getSourceItem();
+			}
+		});			
+	}	
+		
+	function getSourceItem() {
+		var url = serviceURL+"?ep=sourceitem&id="+itemID;
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				itemCodeName = data.codename;
+				sourceTypeID = data.type.id;
+				getTargetItem(data);
+			}
+		});			
+	}
+	
+	function getTargetItem(item) {	
+		var url = serviceURL+"?ep=targetitem&codename="+itemCodeName;
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				syncItem("PUT",item);
+			},
+			error: function(data) {
+				if (data.status==404) {
+					syncItem("POST",item);
+				}
+			}
+		});
+	}
+	
+	function syncItem(update,item) {
+		var url = serviceURL+"?ep=syncitem"+update+"&codename="+itemCodeName;
+		var data = {
+					  "name": item.name,
+					  "type": {
+						"codename": findTypeCodeName(item.type.id)
+					  }
+				   }
+				
+		$.ajax({
+			url: url,
+			type: "POST",
+			data: JSON.stringify(data),
+			success: function (data) {
+				targetTypeID = data.type.id;
+				getSourceVariant();
+			},
+			error: function(data) {
+				if (data.status==400) {
+					showError("There is no content type with source codename on target.");
+				}
+			}
+		});		
+	}
+		
+	function findTypeCodeName(id) {
+		for (var x = 0; x < sourceTypes.length; x++) {
+			if (sourceTypes[x].id.toLowerCase()==id.toLowerCase()) {
+				return sourceTypes[x].codename;
+			}
+		}
+		return '';
+	}
+	
+	function getSourceVariant() {
+		var url = serviceURL+"?ep=sourcevariant&id="+itemID+"&culture="+itemCulture;
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				elements = data.elements;
+				getTargetVariant();
+			}
+		});		
+	}
+	
+	function getTargetVariant() {
+		var url = serviceURL+"?ep=targetvariant&codename="+itemCodeName+"&culture="+itemCulture;
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				if (isPublished(data.workflow_step.id)) {
+					createNewVersion();
+				}
+				else {
+					syncVariant();
+				}
+			},
+			error: function(data) {
+				if (data.status==404) {
+					syncVariant();
+				}
+			}
+		});		
+	}
+		
+	function createNewVersion() {
+		var url = serviceURL+"?ep=newversion&codename="+itemCodeName+"&culture="+itemCulture;
+				
+		$.ajax({
+			url: url,
+			type: "POST",
+			success: function (data) {
+				syncVariant();
+			}
+		});		
+	}
+		
+	function syncVariant() {
+		var url = serviceURL+"?ep=syncvariant&codename="+itemCodeName+"&culture="+itemCulture;
+		var data = {
+					"elements": processElements()
+				   }
+				
+		$.ajax({
+			url: url,
+			type: "POST",
+			data: JSON.stringify(data),
+			success: function (data) {
+				if (isPublished($("#workflow").val())) {
+					publishVariant();
+				}
+				else {
+					moveToWorkflow($("#workflow").val());
+				}
+				console.log("variant synced");
+			}
+		});		
+	}
+	
+	function isPublished(id) {
+		for (var x = 0; x < workflow.length; x++) {
+			if (workflow[x].id.toLowerCase()==id.toLowerCase() && workflow[x].name.toLowerCase() == "published") {
+				return true;
+			}
+		}
+		return false;	
+	}
+	
+	function getWorkflow() {
+		var url = serviceURL+"?ep=workflow";
+				
+		$.ajax({
+			url: url,
+			type: "GET",
+			success: function (data) {
+				processWorkflow(data);
+			}
+		});		
+	}
+	
+	function processWorkflow(data) {
+		if (data.length > 0) {
+			workflow = data;
+			for(var x = 0; x < data.length; x++) {
+				$("#workflow").append(new Option(data[x].name, data[x].id));
+			}
+			$('#sync').show();
+			setup();
+		}
+	}
+	
+	function moveToWorkflow(workflow) {
+		var url = serviceURL+"?ep=movetoworkflow&codename="+itemCodeName+"&culture="+itemCulture+"&workflow="+workflow;
+				
+		$.ajax({
+			url: url,
+			type: "POST",
+			success: function (data) {
+				console.log("variant moved");				
+			}
+		});		
+	}
+	
+	function publishVariant() {
+		var url = serviceURL+"?ep=publish&codename="+itemCodeName+"&culture="+itemCulture;
+				
+		$.ajax({
+			url: url,
+			type: "POST",
+			success: function (data) {
+				console.log("variant published");				
+			}
+		});		
+	}
+	
+	function processElements() {
+		var elements2sync = [];
+		for (var x = 0; x < targetTypes.length; x++) {
+			if (targetTypes[x].id==targetTypeID) {
+				for (var y = 0; y < targetTypes[x].elements.length; y++) {
+					if (!skipTypes.includes(targetTypes[x].elements[y].type)) {
+						var element = findSourceElement(x,y);
+						if (!jQuery.isEmptyObject(element)) {
+							elements2sync.push(element);
+						}
+					}
+				}
+			}
+		}
+		return elements2sync;
+	}
+	
+	function findSourceElement(targetx,targety) {
+		var codename = targetTypes[targetx].elements[targety].codename;
+		for (var x = 0; x < sourceTypes.length; x++) {
+			if (sourceTypes[x].id==sourceTypeID) {
+				for (var y = 0; y < sourceTypes[x].elements.length; y++) {	
+					if (sourceTypes[x].elements[y].codename==codename) {
+						var value = findElementValue(x,y,targetx,targety);
+						if (value) {
+							var element = {
+								"element": {
+									"codename": codename
+								},
+								"value": value
+							}
+							return element;
+						}
+					}
+				}
+			}
+		}
+		return null;
+	}
+	
+	function findElementValue(sourcex,sourcey,targetx,targety) {
+		var id = sourceTypes[sourcex].elements[sourcey].id;
+		for (var x = 0; x < elements.length; x++) {
+			if (elements[x].element.id==id) {
+				var value = elements[x].value;
+				if (value) {
+					if (targetTypes[targetx].elements[targety].type=="multiple_choice") {
+						for (var y = 0; y < elements[x].value.length; y++) {
+							value = JSON.parse(JSON.stringify(value).replace(elements[x].value[y].id, matchMultipleChioceIDs(sourcex,sourcey,targetx,targety,elements[x].value[y].id)));
+						}					
+					}
+					if (targetTypes[targetx].elements[targety].type=="taxonomy") {
+						var sourceTaxonomyIndex = getTaxonomyIndex("source",sourceTypes[sourcex].elements[sourcey].codename);
+						var targetTaxonomyIndex = getTaxonomyIndex("target",sourceTypes[sourcex].elements[sourcey].codename);
+						if (sourceTaxonomyIndex>=0 && targetTaxonomyIndex>=0) {
+							for (var y = 0; y < elements[x].value.length; y++) {
+								value = JSON.parse(JSON.stringify(value).replace(elements[x].value[y].id, matchTaxonomyIDs(sourceTaxonomyIndex,targetTaxonomyIndex,elements[x].value[y].id)));
+							}
+						}
+					}	
+					if (targetTypes[targetx].elements[targety].type=="rich_text") {
+						value = processRichText(value);
+					}				
+					return value;
+				}
+			}
+		}
+		return null;
+	}
+	
+	function matchMultipleChioceIDs(sourcex,sourcey,targetx,targety,value) {
+		for (var x = 0; x < sourceTypes[sourcex].elements[sourcey].options.length; x++) {
+			if (sourceTypes[sourcex].elements[sourcey].options[x].id==value) {
+				return findMultipleChioceTargetID(targetx,targety,sourceTypes[sourcex].elements[sourcey].options[x].codename);				
+			}
+		}
+		return null;
+	}
+	
+	function findMultipleChioceTargetID(targetx,targety,codename) {
+		for (var x = 0; x < targetTypes[targetx].elements[targety].options.length; x++) {
+			if (targetTypes[targetx].elements[targety].options[x].codename==codename) {
+				return targetTypes[targetx].elements[targety].options[x].id;				
+			}
+		}
+		return null;
+	}
+	
+	function getTaxonomyIndex(source,codename) {
+		var taxonomy = (source=="source"?sourceTaxonomies:targetTaxonomies);
+		for (var x = 0; x < taxonomy.length; x++) {
+			if (taxonomy[x].codename==codename) {
+				return x;				
+			}
+		}
+		return null;
+	}
+	
+	function matchTaxonomyIDs(sourceTaxonomyIndex,targetTaxonomyIndex,value) {
+		for (var x = 0; x < sourceTaxonomies[sourceTaxonomyIndex].terms.length; x++) {
+			if (sourceTaxonomies[sourceTaxonomyIndex].terms[x].id==value) {		
+				return findTaxonomyTargetID(targetTaxonomyIndex,sourceTaxonomies[sourceTaxonomyIndex].terms[x].codename);				
+			}
+		}
+		return null;
+	}
+	
+	function findTaxonomyTargetID(targetTaxonomyIndex,codename) {
+		for (var x = 0; x < targetTaxonomies[targetTaxonomyIndex].terms.length; x++) {
+			if (targetTaxonomies[targetTaxonomyIndex].terms[x].codename==codename) {
+				return targetTaxonomies[targetTaxonomyIndex].terms[x].id;				
+			}
+		}
+		return null;
+	}
+	
+	function processRichText(value) {
+		value = value.replace(/<figure.*data-asset-id="([^"]*)"[^>]*><img[^>]*><\/figure>/g, "<p>[asset id=$1]</p>");
+		value = value.replace(/<object.*data-type="([^"]*).*data-id="([^"]*)[^>]*><\/object>/g, "<p>[$1 id=$2]</p>");
+		return value;
+	}
+  
+	function updateSize() {
+		var height = 150;
+		try {
+			height = parseInt($("html").height());		
+		} catch (err) {
+			console.error(err);
+		}
+		CustomElement.setHeight(height);
+	}
+  
+	function initCustomElement() {
+		try {
+			CustomElement.init((element, _context) => {	
+				var configError = false;
+				var sourceProject = '';
+				if (element.config) {
+					if (element.config.sourceProject) sourceProject = element.config.sourceProject;
+					else {
+						showError("Your configuration doesn't contain the source project ID. Please check the documentation of this element.");
+						configError = true;
+					}
+					if (element.config.serviceURL) {serviceURL = element.config.serviceURL;}
+					else {
+						showError("Your configuration doesn't contain the url of a synchronization service. Please check the documentation of this element.");
+						configError = true;
+					}
+					if (_context.projectId.toLowerCase()!=sourceProject.toLowerCase()) {
+						showError("Synchronization is possible only on source environment.");
+						configError = true;
+					}
+				}
+				else {
+					showError("You haven't configured your custom element correctly. Please check the documentation of this element.");
+					configError = true;
+				}
+				if (!configError) {
+					getWorkflow(); 
+				}		
+				updateSize();
+				itemCodeName = _context.item.codename;
+				itemID = _context.item.id;
+				itemCulture = _context.variant.codename;
+			});
+		} catch (err) {
+			console.error(err);
+		}
+	}  
+	
+	initCustomElement();	
+	
+	function showError(message) {
+		$('#sync').hide();
+		$('#unique-status').addClass("item-status--failed");						
+		$('#unique-status').text(message);					
+		$('#unique-status').show();
+		updateSize();
+	}
+	
+
+</script>
+
+</body>
+</html>
